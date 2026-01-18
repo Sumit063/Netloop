@@ -30,6 +30,13 @@ Verbose server logging:
 ./bin/server 9090 -v
 ```
 
+Chat server/client:
+
+```bash
+./bin/chat_server 9091
+./bin/chat_client 127.0.0.1 9091
+```
+
 Interactive client:
 
 ```bash

@@ -8,13 +8,17 @@ BIN_DIR := bin
 
 SERVER_SRC := $(SRC_DIR)/server.c
 CLIENT_SRC := $(SRC_DIR)/client.c
+CHAT_SERVER_SRC := $(SRC_DIR)/chat_server.c
+CHAT_CLIENT_SRC := $(SRC_DIR)/chat_client.c
 
 SERVER_BIN := $(BIN_DIR)/server
 CLIENT_BIN := $(BIN_DIR)/client
+CHAT_SERVER_BIN := $(BIN_DIR)/chat_server
+CHAT_CLIENT_BIN := $(BIN_DIR)/chat_client
 
 .PHONY: all clean
 
-all: $(SERVER_BIN) $(CLIENT_BIN)
+all: $(SERVER_BIN) $(CLIENT_BIN) $(CHAT_SERVER_BIN) $(CHAT_CLIENT_BIN)
 
 $(BIN_DIR):
 	mkdir -p $(BIN_DIR)
@@ -23,6 +27,12 @@ $(SERVER_BIN): $(SERVER_SRC) | $(BIN_DIR)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
 $(CLIENT_BIN): $(CLIENT_SRC) | $(BIN_DIR)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+$(CHAT_SERVER_BIN): $(CHAT_SERVER_SRC) | $(BIN_DIR)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+$(CHAT_CLIENT_BIN): $(CHAT_CLIENT_SRC) | $(BIN_DIR)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
 clean:
