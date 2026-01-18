@@ -17,11 +17,15 @@
 #define WRITE_TIMEOUT_SEC 5
 #define OUT_HIGH_WM (64 * 1024)
 #define OUT_LOW_WM (16 * 1024)
+#define RATE_TOKENS_PER_SEC 5.0
+#define BURST_TOKENS 10.0
 
 static unsigned long g_timeouts = 0;
 
 struct client {
     struct bufferevent *bev;
+    double tokens;
+    struct timeval last_refill;
 };
 
 static int create_listener_socket(const char *port) {
@@ -121,6 +125,34 @@ static int handle_command(struct client *c, const char *line) {
     return 0;
 }
 
+static double min_double(double a, double b) {
+    return a < b ? a : b;
+}
+
+static void bucket_init(struct client *c) {
+    c->tokens = BURST_TOKENS;
+    evutil_gettimeofday(&c->last_refill, NULL);
+}
+
+static int bucket_consume(struct client *c) {
+    struct timeval now;
+    evutil_gettimeofday(&now, NULL);
+
+    double elapsed = (double)(now.tv_sec - c->last_refill.tv_sec) +
+        (double)(now.tv_usec - c->last_refill.tv_usec) / 1000000.0;
+    if (elapsed > 0) {
+        c->tokens = min_double(BURST_TOKENS, c->tokens + elapsed * RATE_TOKENS_PER_SEC);
+        c->last_refill = now;
+    }
+
+    if (c->tokens >= 1.0) {
+        c->tokens -= 1.0;
+        return 1;
+    }
+
+    return 0;
+}
+
 static void maybe_pause_reads(struct client *c) {
     struct evbuffer *output = bufferevent_get_output(c->bev);
     size_t out_len = evbuffer_get_length(output);
@@ -147,6 +179,14 @@ static void client_read_cb(struct bufferevent *bev, void *arg) {
             free(line);
             close_client(c);
             return;
+        }
+
+        if (!bucket_consume(c)) {
+            const char *resp = "429 SLOWDOWN\n";
+            bufferevent_write(c->bev, resp, strlen(resp));
+            free(line);
+            maybe_pause_reads(c);
+            continue;
         }
 
         int rc = handle_command(c, line);
@@ -214,6 +254,7 @@ static void accept_cb(evutil_socket_t fd, short events, void *arg) {
             close_client(c);
             continue;
         }
+        bucket_init(c);
 
         bufferevent_setcb(c->bev, client_read_cb, client_write_cb, client_event_cb, c);
         {
