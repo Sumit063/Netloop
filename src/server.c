@@ -51,7 +51,7 @@ static int create_listener_socket(const char *port) {
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_flags = AI_PASSIVE;
 
-    // Beej flow: getaddrinfo -> socket -> bind -> listen.
+    // Socket flow: getaddrinfo -> socket -> bind -> listen.
     rv = getaddrinfo(NULL, port, &hints, &res);
     if (rv != 0) {
         fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rv));

@@ -21,7 +21,7 @@ static int connect_to_server(const char *host, const char *port) {
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
 
-    // Beej flow: getaddrinfo -> socket -> connect.
+    // Socket flow: getaddrinfo -> socket -> connect.
     rv = getaddrinfo(host, port, &hints, &res);
     if (rv != 0) {
         fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rv));
