@@ -20,7 +20,17 @@
 #define RATE_TOKENS_PER_SEC 5.0
 #define BURST_TOKENS 10.0
 
-static unsigned long g_timeouts = 0;
+struct server_stats {
+    unsigned long active_connections;
+    unsigned long total_accepted;
+    unsigned long bytes_in;
+    unsigned long bytes_out;
+    unsigned long timeouts;
+    unsigned long rate_limited;
+    unsigned long closed_by_client;
+};
+
+static struct server_stats g_stats;
 
 struct client {
     struct bufferevent *bev;
@@ -91,13 +101,24 @@ static void close_client(struct client *c) {
     if (c->bev) {
         bufferevent_free(c->bev);
     }
+    if (g_stats.active_connections > 0) {
+        g_stats.active_connections--;
+    }
     free(c);
+}
+
+static int queue_response(struct client *c, const char *buf, size_t len) {
+    int rc = bufferevent_write(c->bev, buf, len);
+    if (rc == 0) {
+        g_stats.bytes_out += len;
+    }
+    return rc;
 }
 
 static int handle_command(struct client *c, const char *line) {
     if (strcmp(line, "PING") == 0) {
         const char *resp = "PONG\n";
-        bufferevent_write(c->bev, resp, strlen(resp));
+        queue_response(c, resp, strlen(resp));
         return 0;
     }
 
@@ -106,20 +127,44 @@ static int handle_command(struct client *c, const char *line) {
         int wrote = snprintf(resp, sizeof(resp), "%s\n", line + 5);
         if (wrote < 0 || (size_t)wrote >= sizeof(resp)) {
             const char *err = "ERR too_long\n";
-            bufferevent_write(c->bev, err, strlen(err));
+            queue_response(c, err, strlen(err));
             return 0;
         }
-        bufferevent_write(c->bev, resp, (size_t)wrote);
+        queue_response(c, resp, (size_t)wrote);
+        return 0;
+    }
+
+    if (strcmp(line, "STATS") == 0) {
+        char resp[256];
+        int wrote = snprintf(resp, sizeof(resp),
+            "active_connections=%lu\n"
+            "total_accepted=%lu\n"
+            "bytes_in=%lu\n"
+            "bytes_out=%lu\n"
+            "timeouts=%lu\n"
+            "rate_limited=%lu\n"
+            "closed_by_client=%lu\n",
+            g_stats.active_connections,
+            g_stats.total_accepted,
+            g_stats.bytes_in,
+            g_stats.bytes_out,
+            g_stats.timeouts,
+            g_stats.rate_limited,
+            g_stats.closed_by_client);
+        if (wrote > 0) {
+            queue_response(c, resp, (size_t)wrote);
+        }
         return 0;
     }
 
     if (strcmp(line, "QUIT") == 0) {
+        g_stats.closed_by_client++;
         return 1;
     }
 
     {
         const char *resp = "ERR unknown\n";
-        bufferevent_write(c->bev, resp, strlen(resp));
+        queue_response(c, resp, strlen(resp));
     }
 
     return 0;
@@ -175,15 +220,18 @@ static void client_read_cb(struct bufferevent *bev, void *arg) {
 
         if (line_len >= MAX_LINE) {
             const char *err = "ERR too_long\n";
-            bufferevent_write(c->bev, err, strlen(err));
+            queue_response(c, err, strlen(err));
             free(line);
             close_client(c);
             return;
         }
 
+        g_stats.bytes_in += line_len + 1;
+
         if (!bucket_consume(c)) {
             const char *resp = "429 SLOWDOWN\n";
-            bufferevent_write(c->bev, resp, strlen(resp));
+            queue_response(c, resp, strlen(resp));
+            g_stats.rate_limited++;
             free(line);
             maybe_pause_reads(c);
             continue;
@@ -214,12 +262,18 @@ static void client_event_cb(struct bufferevent *bev, short events, void *arg) {
     struct client *c = arg;
 
     if (events & BEV_EVENT_TIMEOUT) {
-        g_timeouts++;
+        g_stats.timeouts++;
         close_client(c);
         return;
     }
 
-    if (events & (BEV_EVENT_EOF | BEV_EVENT_ERROR)) {
+    if (events & BEV_EVENT_EOF) {
+        g_stats.closed_by_client++;
+        close_client(c);
+        return;
+    }
+
+    if (events & BEV_EVENT_ERROR) {
         close_client(c);
     }
 }
@@ -255,6 +309,8 @@ static void accept_cb(evutil_socket_t fd, short events, void *arg) {
             continue;
         }
         bucket_init(c);
+        g_stats.total_accepted++;
+        g_stats.active_connections++;
 
         bufferevent_setcb(c->bev, client_read_cb, client_write_cb, client_event_cb, c);
         {
