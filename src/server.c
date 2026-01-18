@@ -38,7 +38,24 @@ struct client {
     double tokens;
     struct timeval last_refill;
     char peer[NI_MAXHOST + NI_MAXSERV + 2];
+    struct timeval connected_at;
 };
+
+static double elapsed_ms(const struct timeval *start, const struct timeval *end) {
+    double sec = (double)(end->tv_sec - start->tv_sec);
+    double usec = (double)(end->tv_usec - start->tv_usec) / 1000000.0;
+    return (sec + usec) * 1000.0;
+}
+
+static void log_disconnect(struct client *c, const char *reason) {
+    if (!g_verbose || !c) {
+        return;
+    }
+    struct timeval now;
+    evutil_gettimeofday(&now, NULL);
+    printf("client %s disconnect: %s age_ms=%.3f\n",
+        c->peer, reason, elapsed_ms(&c->connected_at, &now));
+}
 
 static void format_peer(const struct sockaddr_storage *addr, socklen_t addr_len,
     char *out, size_t out_len) {
@@ -232,10 +249,15 @@ static void client_read_cb(struct bufferevent *bev, void *arg) {
         if (!line) {
             break;
         }
+        struct timeval t0;
+        if (g_verbose) {
+            evutil_gettimeofday(&t0, NULL);
+        }
 
         if (line_len >= MAX_LINE) {
             const char *err = "ERR too_long\n";
             queue_response(c, err, strlen(err));
+            log_disconnect(c, "line_too_long");
             free(line);
             close_client(c);
             return;
@@ -243,22 +265,31 @@ static void client_read_cb(struct bufferevent *bev, void *arg) {
 
         g_stats.bytes_in += line_len + 1;
 
-        if (g_verbose) {
-            printf("client %s cmd: %s\n", c->peer, line);
-        }
-
         if (!bucket_consume(c)) {
             const char *resp = "429 SLOWDOWN\n";
             queue_response(c, resp, strlen(resp));
             g_stats.rate_limited++;
+            if (g_verbose) {
+                struct timeval t1;
+                evutil_gettimeofday(&t1, NULL);
+                printf("client %s cmd: %s latency_ms=%.3f rate_limited=1\n",
+                    c->peer, line, elapsed_ms(&t0, &t1));
+            }
             free(line);
             maybe_pause_reads(c);
             continue;
         }
 
         int rc = handle_command(c, line);
+        if (g_verbose) {
+            struct timeval t1;
+            evutil_gettimeofday(&t1, NULL);
+            printf("client %s cmd: %s latency_ms=%.3f\n",
+                c->peer, line, elapsed_ms(&t0, &t1));
+        }
         free(line);
         if (rc != 0) {
+            log_disconnect(c, "client_quit");
             close_client(c);
             return;
         }
@@ -282,17 +313,26 @@ static void client_event_cb(struct bufferevent *bev, short events, void *arg) {
 
     if (events & BEV_EVENT_TIMEOUT) {
         g_stats.timeouts++;
+        log_disconnect(c, "timeout");
         close_client(c);
         return;
     }
 
     if (events & BEV_EVENT_EOF) {
         g_stats.closed_by_client++;
+        log_disconnect(c, "eof");
         close_client(c);
         return;
     }
 
     if (events & BEV_EVENT_ERROR) {
+        if (g_verbose) {
+            int err = EVUTIL_SOCKET_ERROR();
+            const char *err_str = evutil_socket_error_to_string(err);
+            char reason[128];
+            snprintf(reason, sizeof(reason), "error:%s", err_str);
+            log_disconnect(c, reason);
+        }
         close_client(c);
     }
 }
@@ -323,6 +363,7 @@ static void accept_cb(evutil_socket_t fd, short events, void *arg) {
         }
 
         format_peer(&client_addr, client_len, c->peer, sizeof(c->peer));
+        evutil_gettimeofday(&c->connected_at, NULL);
         c->bev = bufferevent_socket_new(base, client_fd, BEV_OPT_CLOSE_ON_FREE);
         if (!c->bev) {
             close_client(c);
