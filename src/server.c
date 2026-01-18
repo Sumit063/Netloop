@@ -15,6 +15,8 @@
 #define MAX_LINE 1024
 #define READ_TIMEOUT_SEC 5
 #define WRITE_TIMEOUT_SEC 5
+#define OUT_HIGH_WM (64 * 1024)
+#define OUT_LOW_WM (16 * 1024)
 
 static unsigned long g_timeouts = 0;
 
@@ -119,6 +121,14 @@ static int handle_command(struct client *c, const char *line) {
     return 0;
 }
 
+static void maybe_pause_reads(struct client *c) {
+    struct evbuffer *output = bufferevent_get_output(c->bev);
+    size_t out_len = evbuffer_get_length(output);
+    if (out_len > OUT_HIGH_WM) {
+        bufferevent_disable(c->bev, EV_READ);
+    }
+}
+
 static void client_read_cb(struct bufferevent *bev, void *arg) {
     (void)bev;
     struct client *c = arg;
@@ -145,6 +155,17 @@ static void client_read_cb(struct bufferevent *bev, void *arg) {
             close_client(c);
             return;
         }
+        maybe_pause_reads(c);
+    }
+}
+
+static void client_write_cb(struct bufferevent *bev, void *arg) {
+    (void)bev;
+    struct client *c = arg;
+    struct evbuffer *output = bufferevent_get_output(c->bev);
+    size_t out_len = evbuffer_get_length(output);
+    if (out_len <= OUT_LOW_WM) {
+        bufferevent_enable(c->bev, EV_READ);
     }
 }
 
@@ -194,7 +215,7 @@ static void accept_cb(evutil_socket_t fd, short events, void *arg) {
             continue;
         }
 
-        bufferevent_setcb(c->bev, client_read_cb, NULL, client_event_cb, c);
+        bufferevent_setcb(c->bev, client_read_cb, client_write_cb, client_event_cb, c);
         {
             struct timeval read_tv = { READ_TIMEOUT_SEC, 0 };
             struct timeval write_tv = { WRITE_TIMEOUT_SEC, 0 };

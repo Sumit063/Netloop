@@ -71,7 +71,7 @@ static int send_all(int fd, const char *buf, size_t len) {
     return 0;
 }
 
-static ssize_t recv_line(int fd, char *out, size_t max_len) {
+static ssize_t recv_line(int fd, char *out, size_t max_len, unsigned int slow_ms) {
     size_t used = 0;
 
     if (max_len == 0) {
@@ -94,6 +94,9 @@ static ssize_t recv_line(int fd, char *out, size_t max_len) {
             break;
         }
         out[used++] = c;
+        if (slow_ms > 0) {
+            usleep(slow_ms * 1000);
+        }
     }
 
     if (used > 0 && out[used - 1] == '\r') {
@@ -132,17 +135,27 @@ static char *join_command(int argc, char **argv, int start) {
 }
 
 int main(int argc, char **argv) {
-    if (argc < 4) {
-        fprintf(stderr, "usage: %s <host> <port> <command>\n", argv[0]);
+    unsigned int slow_ms = 0;
+    int argi = 1;
+
+    if (argc >= 2 && strcmp(argv[1], "--slow") == 0) {
+        if (argc < 6) {
+            fprintf(stderr, "usage: %s [--slow <ms>] <host> <port> <command>\n", argv[0]);
+            return 1;
+        }
+        slow_ms = (unsigned int)strtoul(argv[2], NULL, 10);
+        argi = 3;
+    } else if (argc < 4) {
+        fprintf(stderr, "usage: %s [--slow <ms>] <host> <port> <command>\n", argv[0]);
         return 1;
     }
 
-    int fd = connect_to_server(argv[1], argv[2]);
+    int fd = connect_to_server(argv[argi], argv[argi + 1]);
     if (fd < 0) {
         return 1;
     }
 
-    char *cmd = join_command(argc, argv, 3);
+    char *cmd = join_command(argc, argv, argi + 2);
     if (!cmd) {
         fprintf(stderr, "client: out of memory\n");
         close(fd);
@@ -165,7 +178,7 @@ int main(int argc, char **argv) {
     }
 
     char resp[MAX_LINE];
-    ssize_t n = recv_line(fd, resp, sizeof(resp));
+    ssize_t n = recv_line(fd, resp, sizeof(resp), slow_ms);
     if (n == 0) {
         printf("client: server closed\n");
     } else if (n < 0) {
