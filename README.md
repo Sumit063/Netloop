@@ -24,6 +24,12 @@ Two terminals:
 ./bin/client 127.0.0.1 9090 PING
 ```
 
+Verbose server logging:
+
+```bash
+./bin/server 9090 -v
+```
+
 Interactive client:
 
 ```bash

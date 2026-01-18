@@ -31,12 +31,27 @@ struct server_stats {
 };
 
 static struct server_stats g_stats;
+static int g_verbose = 0;
 
 struct client {
     struct bufferevent *bev;
     double tokens;
     struct timeval last_refill;
+    char peer[NI_MAXHOST + NI_MAXSERV + 2];
 };
+
+static void format_peer(const struct sockaddr_storage *addr, socklen_t addr_len,
+    char *out, size_t out_len) {
+    char host[NI_MAXHOST];
+    char serv[NI_MAXSERV];
+    int rc = getnameinfo((const struct sockaddr *)addr, addr_len,
+        host, sizeof(host), serv, sizeof(serv), NI_NUMERICHOST | NI_NUMERICSERV);
+    if (rc == 0) {
+        snprintf(out, out_len, "%s:%s", host, serv);
+        return;
+    }
+    snprintf(out, out_len, "unknown");
+}
 
 static int create_listener_socket(const char *port) {
     struct addrinfo hints;
@@ -228,6 +243,10 @@ static void client_read_cb(struct bufferevent *bev, void *arg) {
 
         g_stats.bytes_in += line_len + 1;
 
+        if (g_verbose) {
+            printf("client %s cmd: %s\n", c->peer, line);
+        }
+
         if (!bucket_consume(c)) {
             const char *resp = "429 SLOWDOWN\n";
             queue_response(c, resp, strlen(resp));
@@ -303,6 +322,7 @@ static void accept_cb(evutil_socket_t fd, short events, void *arg) {
             continue;
         }
 
+        format_peer(&client_addr, client_len, c->peer, sizeof(c->peer));
         c->bev = bufferevent_socket_new(base, client_fd, BEV_OPT_CLOSE_ON_FREE);
         if (!c->bev) {
             close_client(c);
@@ -321,13 +341,25 @@ static void accept_cb(evutil_socket_t fd, short events, void *arg) {
         bufferevent_enable(c->bev, EV_READ | EV_WRITE);
 
         printf("server: client connected\n");
+        if (g_verbose) {
+            printf("server: peer %s connected\n", c->peer);
+        }
     }
 }
 
 int main(int argc, char **argv) {
-    if (argc < 2) {
-        fprintf(stderr, "usage: %s <port>\n", argv[0]);
+    if (argc < 2 || argc > 3) {
+        fprintf(stderr, "usage: %s <port> [-v]\n", argv[0]);
         return 1;
+    }
+
+    if (argc == 3) {
+        if (strcmp(argv[2], "-v") == 0) {
+            g_verbose = 1;
+        } else {
+            fprintf(stderr, "usage: %s <port> [-v]\n", argv[0]);
+            return 1;
+        }
     }
 
     if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
