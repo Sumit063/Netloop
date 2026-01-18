@@ -1,5 +1,6 @@
 #include <errno.h>
 #include <netdb.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -124,6 +125,11 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
+        perror("signal");
+        return 1;
+    }
+
     int listener_fd = create_listener_socket(argv[1]);
     if (listener_fd < 0) {
         return 1;
@@ -131,61 +137,66 @@ int main(int argc, char **argv) {
 
     printf("server: listening on %s\n", argv[1]);
 
-    // Beej flow: accept a client socket.
-    struct sockaddr_storage client_addr;
-    socklen_t client_len = sizeof(client_addr);
-    int client_fd = accept(listener_fd, (struct sockaddr *)&client_addr, &client_len);
-    if (client_fd < 0) {
-        perror("accept");
-        close(listener_fd);
-        return 1;
-    }
-
-    printf("server: client connected\n");
-
     for (;;) {
-        char line[MAX_LINE];
-        ssize_t n = recv_line(client_fd, line, sizeof(line));
-        if (n == 0) {
-            printf("server: client closed\n");
-            break;
-        }
-        if (n < 0) {
-            perror("recv");
-            break;
-        }
-
-        if (strcmp(line, "PING") == 0) {
-            const char *resp = "PONG\n";
-            if (send_all(client_fd, resp, strlen(resp)) < 0) {
-                perror("send");
-                break;
-            }
-        } else if (strncmp(line, "ECHO ", 5) == 0) {
-            char resp[MAX_LINE + 8];
-            int wrote = snprintf(resp, sizeof(resp), "%s\n", line + 5);
-            if (wrote < 0 || (size_t)wrote >= sizeof(resp)) {
-                const char *err = "ERR too_long\n";
-                send_all(client_fd, err, strlen(err));
+        // Beej flow: accept a client socket.
+        struct sockaddr_storage client_addr;
+        socklen_t client_len = sizeof(client_addr);
+        int client_fd = accept(listener_fd, (struct sockaddr *)&client_addr, &client_len);
+        if (client_fd < 0) {
+            if (errno == EINTR) {
                 continue;
             }
-            if (send_all(client_fd, resp, (size_t)wrote) < 0) {
-                perror("send");
+            perror("accept");
+            continue;
+        }
+
+        printf("server: client connected\n");
+
+        for (;;) {
+            char line[MAX_LINE];
+            ssize_t n = recv_line(client_fd, line, sizeof(line));
+            if (n == 0) {
+                printf("server: client closed\n");
                 break;
             }
-        } else if (strcmp(line, "QUIT") == 0) {
-            printf("server: client requested quit\n");
-            break;
-        } else {
-            const char *resp = "ERR unknown\n";
-            if (send_all(client_fd, resp, strlen(resp)) < 0) {
-                perror("send");
+            if (n < 0) {
+                perror("recv");
                 break;
+            }
+
+            if (strcmp(line, "PING") == 0) {
+                const char *resp = "PONG\n";
+                if (send_all(client_fd, resp, strlen(resp)) < 0) {
+                    perror("send");
+                    break;
+                }
+            } else if (strncmp(line, "ECHO ", 5) == 0) {
+                char resp[MAX_LINE + 8];
+                int wrote = snprintf(resp, sizeof(resp), "%s\n", line + 5);
+                if (wrote < 0 || (size_t)wrote >= sizeof(resp)) {
+                    const char *err = "ERR too_long\n";
+                    send_all(client_fd, err, strlen(err));
+                    continue;
+                }
+                if (send_all(client_fd, resp, (size_t)wrote) < 0) {
+                    perror("send");
+                    break;
+                }
+            } else if (strcmp(line, "QUIT") == 0) {
+                printf("server: client requested quit\n");
+                break;
+            } else {
+                const char *resp = "ERR unknown\n";
+                if (send_all(client_fd, resp, strlen(resp)) < 0) {
+                    perror("send");
+                    break;
+                }
             }
         }
+
+        close(client_fd);
     }
 
-    close(client_fd);
     close(listener_fd);
     return 0;
 }
