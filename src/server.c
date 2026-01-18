@@ -1,4 +1,6 @@
 #include <errno.h>
+#include <event2/buffer.h>
+#include <event2/bufferevent.h>
 #include <event2/event.h>
 #include <event2/util.h>
 #include <netdb.h>
@@ -11,13 +13,9 @@
 #include <unistd.h>
 
 #define MAX_LINE 1024
-#define INBUF_SIZE 4096
 
 struct client {
-    int fd;
-    struct event *read_event;
-    char buf[INBUF_SIZE];
-    size_t buf_len;
+    struct bufferevent *bev;
 };
 
 static int create_listener_socket(const char *port) {
@@ -80,44 +78,16 @@ static void close_client(struct client *c) {
     if (!c) {
         return;
     }
-    if (c->read_event) {
-        event_free(c->read_event);
-    }
-    if (c->fd >= 0) {
-        close(c->fd);
+    if (c->bev) {
+        bufferevent_free(c->bev);
     }
     free(c);
-}
-
-static int send_response(int fd, const char *buf, size_t len) {
-    size_t sent = 0;
-
-    while (sent < len) {
-        ssize_t n = send(fd, buf + sent, len - sent, 0);
-        if (n < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                return -1;
-            }
-            return -1;
-        }
-        if (n == 0) {
-            return -1;
-        }
-        sent += (size_t)n;
-    }
-
-    return 0;
 }
 
 static int handle_command(struct client *c, const char *line) {
     if (strcmp(line, "PING") == 0) {
         const char *resp = "PONG\n";
-        if (send_response(c->fd, resp, strlen(resp)) < 0) {
-            return -1;
-        }
+        bufferevent_write(c->bev, resp, strlen(resp));
         return 0;
     }
 
@@ -126,12 +96,10 @@ static int handle_command(struct client *c, const char *line) {
         int wrote = snprintf(resp, sizeof(resp), "%s\n", line + 5);
         if (wrote < 0 || (size_t)wrote >= sizeof(resp)) {
             const char *err = "ERR too_long\n";
-            send_response(c->fd, err, strlen(err));
+            bufferevent_write(c->bev, err, strlen(err));
             return 0;
         }
-        if (send_response(c->fd, resp, (size_t)wrote) < 0) {
-            return -1;
-        }
+        bufferevent_write(c->bev, resp, (size_t)wrote);
         return 0;
     }
 
@@ -141,79 +109,47 @@ static int handle_command(struct client *c, const char *line) {
 
     {
         const char *resp = "ERR unknown\n";
-        if (send_response(c->fd, resp, strlen(resp)) < 0) {
-            return -1;
-        }
+        bufferevent_write(c->bev, resp, strlen(resp));
     }
 
     return 0;
 }
 
-static void client_read_cb(evutil_socket_t fd, short events, void *arg) {
-    (void)events;
+static void client_read_cb(struct bufferevent *bev, void *arg) {
+    (void)bev;
     struct client *c = arg;
+    struct evbuffer *input = bufferevent_get_input(c->bev);
 
     for (;;) {
-        char tmp[1024];
-        ssize_t n = recv(fd, tmp, sizeof(tmp), 0);
-        if (n == 0) {
-            close_client(c);
-            return;
-        }
-        if (n < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                break;
-            }
-            perror("recv");
-            close_client(c);
-            return;
+        size_t line_len = 0;
+        char *line = evbuffer_readln(input, &line_len, EVBUFFER_EOL_LF);
+        if (!line) {
+            break;
         }
 
-        if (c->buf_len + (size_t)n > sizeof(c->buf)) {
+        if (line_len >= MAX_LINE) {
             const char *err = "ERR too_long\n";
-            send_response(c->fd, err, strlen(err));
+            bufferevent_write(c->bev, err, strlen(err));
+            free(line);
             close_client(c);
             return;
         }
 
-        memcpy(c->buf + c->buf_len, tmp, (size_t)n);
-        c->buf_len += (size_t)n;
-
-        for (;;) {
-            char *newline = memchr(c->buf, '\n', c->buf_len);
-            if (!newline) {
-                break;
-            }
-
-            size_t line_len = (size_t)(newline - c->buf);
-            if (line_len > 0 && c->buf[line_len - 1] == '\r') {
-                line_len--;
-            }
-            if (line_len >= MAX_LINE) {
-                const char *err = "ERR too_long\n";
-                send_response(c->fd, err, strlen(err));
-                close_client(c);
-                return;
-            }
-
-            char line[MAX_LINE];
-            memcpy(line, c->buf, line_len);
-            line[line_len] = '\0';
-
-            size_t consumed = (size_t)(newline - c->buf + 1);
-            size_t remaining = c->buf_len - consumed;
-            memmove(c->buf, c->buf + consumed, remaining);
-            c->buf_len = remaining;
-
-            int rc = handle_command(c, line);
-            if (rc != 0) {
-                close_client(c);
-                return;
-            }
+        int rc = handle_command(c, line);
+        free(line);
+        if (rc != 0) {
+            close_client(c);
+            return;
         }
+    }
+}
+
+static void client_event_cb(struct bufferevent *bev, short events, void *arg) {
+    (void)bev;
+    struct client *c = arg;
+
+    if (events & (BEV_EVENT_EOF | BEV_EVENT_ERROR)) {
+        close_client(c);
     }
 }
 
@@ -236,28 +172,20 @@ static void accept_cb(evutil_socket_t fd, short events, void *arg) {
             return;
         }
 
-        if (evutil_make_socket_nonblocking(client_fd) < 0) {
-            close(client_fd);
-            continue;
-        }
-
         struct client *c = calloc(1, sizeof(*c));
         if (!c) {
             close(client_fd);
             continue;
         }
 
-        c->fd = client_fd;
-        c->read_event = event_new(base, client_fd, EV_READ | EV_PERSIST, client_read_cb, c);
-        if (!c->read_event) {
+        c->bev = bufferevent_socket_new(base, client_fd, BEV_OPT_CLOSE_ON_FREE);
+        if (!c->bev) {
             close_client(c);
             continue;
         }
 
-        if (event_add(c->read_event, NULL) < 0) {
-            close_client(c);
-            continue;
-        }
+        bufferevent_setcb(c->bev, client_read_cb, NULL, client_event_cb, c);
+        bufferevent_enable(c->bev, EV_READ | EV_WRITE);
 
         printf("server: client connected\n");
     }
