@@ -24,6 +24,12 @@ Two terminals:
 ./bin/client 127.0.0.1 9090 PING
 ```
 
+Interactive client:
+
+```bash
+./bin/client 127.0.0.1 9090
+```
+
 Bench (optional):
 
 ```bash
