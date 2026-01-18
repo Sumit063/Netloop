@@ -13,6 +13,10 @@
 #include <unistd.h>
 
 #define MAX_LINE 1024
+#define READ_TIMEOUT_SEC 5
+#define WRITE_TIMEOUT_SEC 5
+
+static unsigned long g_timeouts = 0;
 
 struct client {
     struct bufferevent *bev;
@@ -148,6 +152,12 @@ static void client_event_cb(struct bufferevent *bev, short events, void *arg) {
     (void)bev;
     struct client *c = arg;
 
+    if (events & BEV_EVENT_TIMEOUT) {
+        g_timeouts++;
+        close_client(c);
+        return;
+    }
+
     if (events & (BEV_EVENT_EOF | BEV_EVENT_ERROR)) {
         close_client(c);
     }
@@ -185,6 +195,11 @@ static void accept_cb(evutil_socket_t fd, short events, void *arg) {
         }
 
         bufferevent_setcb(c->bev, client_read_cb, NULL, client_event_cb, c);
+        {
+            struct timeval read_tv = { READ_TIMEOUT_SEC, 0 };
+            struct timeval write_tv = { WRITE_TIMEOUT_SEC, 0 };
+            bufferevent_set_timeouts(c->bev, &read_tv, &write_tv);
+        }
         bufferevent_enable(c->bev, EV_READ | EV_WRITE);
 
         printf("server: client connected\n");
