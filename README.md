@@ -1,4 +1,4 @@
-# epilogue
+# NetLoop
 
 Small TCP client/server project that evolves from sockets to libevent.
 
