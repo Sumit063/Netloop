@@ -18,11 +18,25 @@
 struct client {
     struct bufferevent *bev;
     char name[MAX_NAME];
+    char peer[NI_MAXHOST + NI_MAXSERV + 2];
     struct client *next;
 };
 
 static struct client *g_clients = NULL;
 static unsigned long g_next_id = 1;
+
+static void format_peer(const struct sockaddr_storage *addr, socklen_t addr_len,
+    char *out, size_t out_len) {
+    char host[NI_MAXHOST];
+    char serv[NI_MAXSERV];
+    int rc = getnameinfo((const struct sockaddr *)addr, addr_len,
+        host, sizeof(host), serv, sizeof(serv), NI_NUMERICHOST | NI_NUMERICSERV);
+    if (rc == 0) {
+        snprintf(out, out_len, "%s:%s", host, serv);
+        return;
+    }
+    snprintf(out, out_len, "unknown");
+}
 
 static int create_listener_socket(const char *port) {
     struct addrinfo hints;
@@ -177,6 +191,8 @@ static void handle_line(struct client *c, char *line) {
             return;
         }
 
+        printf("chat: route dm %s(%s) -> %s(%s)\n",
+            c->name, c->peer, dst->name, dst->peer);
         {
             char out[MAX_LINE];
             snprintf(out, sizeof(out), "DM %s: %s\n", c->name, msg);
@@ -189,6 +205,7 @@ static void handle_line(struct client *c, char *line) {
     {
         char out[MAX_LINE];
         snprintf(out, sizeof(out), "%s: %s\n", c->name, line);
+        printf("chat: route broadcast %s(%s)\n", c->name, c->peer);
         broadcast_line(out);
     }
 }
@@ -197,6 +214,7 @@ static void close_client(struct client *c) {
     if (!c) {
         return;
     }
+    printf("chat: leave %s %s\n", c->name, c->peer);
     remove_client(c);
     if (c->bev) {
         bufferevent_free(c->bev);
@@ -262,6 +280,7 @@ static void accept_cb(evutil_socket_t fd, short events, void *arg) {
             continue;
         }
 
+        format_peer(&client_addr, client_len, c->peer, sizeof(c->peer));
         snprintf(c->name, sizeof(c->name), "anon%lu", g_next_id++);
         add_client(c);
 
@@ -274,6 +293,7 @@ static void accept_cb(evutil_socket_t fd, short events, void *arg) {
         bufferevent_setcb(c->bev, client_read_cb, NULL, client_event_cb, c);
         bufferevent_enable(c->bev, EV_READ | EV_WRITE);
 
+        printf("chat: join %s %s\n", c->name, c->peer);
         send_line(c, "INFO welcome\n");
     }
 }
